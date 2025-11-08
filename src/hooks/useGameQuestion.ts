@@ -78,7 +78,7 @@ export const useGameQuestion = () => {
         // If no cache available, call API
         // Create AbortController for timeout
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 65000); // 65 seconds timeout
+        const timeoutId = setTimeout(() => controller.abort(), 125000); // 125 seconds timeout (matches server timeout)
 
         const response = await fetch("/api/game/generate", {
           method: "POST",

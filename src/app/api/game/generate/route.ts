@@ -81,6 +81,18 @@ const requestCounts = new Map<string, { count: number; lastReset: number }>();
 const RATE_LIMIT = 10; // requests per minute
 const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute in milliseconds
 
+// Request queue to prevent too many simultaneous API calls
+interface QueuedRequest {
+  resolve: (value: string) => void;
+  reject: (error: Error) => void;
+  prompt: string;
+}
+
+const apiRequestQueue: QueuedRequest[] = [];
+let isProcessingQueue = false;
+const MAX_CONCURRENT_API_CALLS = 2; // Limit concurrent API calls
+let activeApiCalls = 0;
+
 // Simple cache to reduce AI calls
 const cache = new Map<string, { word: string; timestamp: number }>();
 const CACHE_TTL = 30 * 1000; // 30 seconds
@@ -170,10 +182,61 @@ function getImagePromptForItem(item: string): string {
   return `a cute cartoon illustration of a ${item}, colorful, simple, clean lines, children's book style, bright colors, digital art, animation style, educational content, white background, isolated object`;
 }
 
+// Process API request queue
+async function processQueue() {
+  if (isProcessingQueue || apiRequestQueue.length === 0) {
+    return;
+  }
+
+  isProcessingQueue = true;
+
+  while (
+    apiRequestQueue.length > 0 &&
+    activeApiCalls < MAX_CONCURRENT_API_CALLS
+  ) {
+    const request = apiRequestQueue.shift();
+    if (!request) break;
+
+    activeApiCalls++;
+    generateImageWithRetryInternal(request.prompt, 5)
+      .then(request.resolve)
+      .catch(request.reject)
+      .finally(() => {
+        activeApiCalls--;
+        // Process next item in queue
+        processQueue();
+      });
+  }
+
+  isProcessingQueue = false;
+}
+
 // Generate image using free public APIs with retry and fallback
 async function generateImageWithRetry(
   prompt: string,
-  maxRetries = 3
+  maxRetries = 5
+): Promise<string> {
+  // Add to queue if we have too many concurrent calls
+  if (activeApiCalls >= MAX_CONCURRENT_API_CALLS) {
+    return new Promise<string>((resolve, reject) => {
+      apiRequestQueue.push({ resolve, reject, prompt });
+      processQueue();
+    });
+  }
+
+  activeApiCalls++;
+  try {
+    return await generateImageWithRetryInternal(prompt, maxRetries);
+  } finally {
+    activeApiCalls--;
+    processQueue();
+  }
+}
+
+// Internal function that actually makes the API call
+async function generateImageWithRetryInternal(
+  prompt: string,
+  maxRetries = 5
 ): Promise<string> {
   const TIMEOUT_MS = 30000; // 30 seconds timeout per request
 
@@ -224,14 +287,40 @@ async function generateImageWithRetry(
       }
 
       if (!response.ok) {
-        // If rate limited, try next API
-        if (response.status === 429) {
-          await new Promise((resolve) => setTimeout(resolve, 2000));
+        const status = response.status;
+        const errorText = await response.text().catch(() => "Unknown error");
+
+        // Handle different error types with appropriate delays
+        if (status === 429) {
+          // Rate limited - wait longer
+          const delay = Math.min(5000 * Math.pow(2, attempt), 30000); // Max 30s
+          const jitter = Math.random() * 1000; // Add random jitter
+          await new Promise((resolve) => setTimeout(resolve, delay + jitter));
           continue;
         }
 
-        const errorText = await response.text().catch(() => "Unknown error");
-        throw new Error(`API error (${response.status}): ${errorText}`);
+        if (status >= 500) {
+          // Server error (500, 502, 503, etc.) - use exponential backoff
+          const baseDelay = 3000; // Start with 3 seconds
+          const delay = Math.min(
+            baseDelay * Math.pow(2, attempt) + Math.random() * 2000,
+            20000 // Max 20 seconds
+          );
+
+          console.log(
+            `Server error ${status} on attempt ${
+              attempt + 1
+            }, retrying in ${Math.round(delay)}ms`
+          );
+
+          // If this is not the last attempt, wait and retry
+          if (attempt < maxRetries - 1) {
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            continue;
+          }
+        }
+
+        throw new Error(`API error (${status}): ${errorText}`);
       }
 
       // Pollinations returns image directly
@@ -241,10 +330,20 @@ async function generateImageWithRetry(
 
       return `data:image/png;base64,${base64}`;
     } catch (error) {
-      console.error(`Error with API ${api.name}:`, error);
+      const isLastAttempt = attempt === maxRetries - 1;
+      const isNetworkError =
+        error instanceof Error &&
+        (error.name === "AbortError" ||
+          error.message.includes("fetch") ||
+          error.message.includes("network"));
+
+      console.error(
+        `Error with API ${api.name} (attempt ${attempt + 1}/${maxRetries}):`,
+        error instanceof Error ? error.message : error
+      );
 
       // If this is the last attempt, throw the error
-      if (attempt === maxRetries - 1) {
+      if (isLastAttempt) {
         throw new Error(
           `Failed to generate image after ${maxRetries} attempts: ${
             error instanceof Error ? error.message : "Unknown error"
@@ -252,8 +351,16 @@ async function generateImageWithRetry(
         );
       }
 
-      // Wait before retrying with next API
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      // Exponential backoff with jitter
+      // For network errors, use shorter delays
+      // For server errors, use longer delays
+      const baseDelay = isNetworkError ? 2000 : 3000;
+      const delay = Math.min(
+        baseDelay * Math.pow(2, attempt) + Math.random() * 1000,
+        isNetworkError ? 10000 : 20000
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 
@@ -359,8 +466,9 @@ function setCachedImage(word: string, image: string): void {
 }
 
 export async function POST(request: NextRequest) {
-  // Set a maximum timeout for the entire request (60 seconds)
-  const REQUEST_TIMEOUT = 60000;
+  // Set a maximum timeout for the entire request (120 seconds)
+  // Increased to accommodate retries with exponential backoff
+  const REQUEST_TIMEOUT = 120000;
 
   const timeoutPromise = new Promise<NextResponse>((resolve) => {
     setTimeout(() => {
