@@ -6,6 +6,7 @@ import { GameState } from "@/types/game";
 interface InputAreaProps {
   userGuess: string;
   gameState: GameState;
+  hintEnabled: boolean;
   onGuessChange: (value: string) => void;
   onSubmit: () => void;
 }
@@ -13,6 +14,7 @@ interface InputAreaProps {
 export const InputArea = ({
   userGuess,
   gameState,
+  hintEnabled,
   onGuessChange,
   onSubmit,
 }: InputAreaProps) => {
@@ -41,18 +43,24 @@ export const InputArea = ({
   };
 
   return (
-    <div className="w-full max-w-lg">
+    <div className="w-full max-w-lg px-2 sm:px-0">
       <input
         ref={inputRef}
         id="guess-input"
-        className="input-3d w-full h-16 sm:h-[72px] px-6 rounded-full text-lg sm:text-xl font-medium bg-white text-text-dark placeholder-gray-500/80 focus:outline-none focus:ring-4 focus:ring-game-primary/50 transition-all duration-300 disabled:opacity-50"
-        placeholder="Type your guess here... (Press Enter to submit)"
+        className="input-3d w-full h-12 sm:h-[72px] px-4 sm:px-6 rounded-full text-base sm:text-xl font-medium bg-white text-text-dark placeholder-gray-500/80 focus:outline-none focus:ring-4 focus:ring-game-primary/50 transition-all duration-300 disabled:opacity-50"
+        placeholder="Type your guess here.."
         type="text"
         value={userGuess}
         onChange={(e) => onGuessChange(e.target.value)}
         onKeyDown={handleKeyDown}
         disabled={!gameState.isPlaying || gameState.isPaused}
       />
+      {gameState.showHint && gameState.currentHint && hintEnabled && (
+        <div className="mt-4 px-4 py-3 rounded-lg bg-yellow-50 border border-yellow-200">
+          <p className="text-sm font-medium text-yellow-800 mb-1">💡 Hint:</p>
+          <p className="text-sm text-yellow-700">{gameState.currentHint}</p>
+        </div>
+      )}
     </div>
   );
 };

@@ -19,8 +19,10 @@ export const useGameState = () => {
 
   const [userGuess, setUserGuess] = useState("");
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const [hintEnabled, setHintEnabled] = useState(true);
   const [score, setScore] = useState(0);
   const [totalQuestions, setTotalQuestions] = useState(0);
+  const [incorrectGuesses, setIncorrectGuesses] = useState(0);
   const [usedWordsInSession, setUsedWordsInSession] = useState<Set<string>>(
     new Set()
   );
@@ -31,10 +33,23 @@ export const useGameState = () => {
     usedWordsRef.current = usedWordsInSession;
   }, [usedWordsInSession]);
 
+  // Reset incorrect guesses when a new question starts
+  useEffect(() => {
+    if (gameState.currentImage && gameState.isPlaying) {
+      setIncorrectGuesses(0);
+      setGameState((prev) => ({
+        ...prev,
+        showHint: false,
+      }));
+    }
+  }, [gameState.currentImage, gameState.isPlaying]);
+
   const { generateNewQuestion, isLoading } = useGameQuestion();
   const { playBeep } = useGameSounds(soundEnabled);
 
   const handleGenerateQuestion = useCallback(() => {
+    // Reset incorrect guesses count when starting a new question
+    setIncorrectGuesses(0);
     generateNewQuestion(
       setGameState,
       usedWordsRef.current,
@@ -103,6 +118,10 @@ export const useGameState = () => {
     }));
   };
 
+  const toggleHint = () => {
+    setHintEnabled((prev) => !prev);
+  };
+
   const submitGuess = () => {
     if (!userGuess.trim() || !gameState.isPlaying) return;
 
@@ -139,17 +158,19 @@ export const useGameState = () => {
         ...prev,
         isPlaying: false,
         gameStatus: "correct",
+        showHint: false,
       }));
+      // Reset incorrect guesses when answer is correct
+      setIncorrectGuesses(0);
 
       // Auto-load next question after 2 seconds (longer to enjoy fireworks)
       // This is handled by the useEffect above
     } else {
-      // Update score: -5 points for wrong answer
-      setScore((prev) => {
-        const newScore = Math.max(0, prev - 5);
-        return newScore;
-      });
-      setTotalQuestions((prev) => prev + 1);
+      // Wrong answer: no score change, no question count change
+      // Player can keep trying until time runs out or they answer correctly
+      // Only 2 cases affect score:
+      // 1. Correct answer: +points based on time left
+      // 2. Timeout: -5 points
       // Play wrong sound and shake input
       if (soundEnabled) {
         playBeep(300, 0.3);
@@ -163,15 +184,33 @@ export const useGameState = () => {
           inputElement.classList.remove("animate-shake");
         }, 500);
       }
+
+      // Increment incorrect guesses count
+      setIncorrectGuesses((prev) => {
+        const newCount = prev + 1;
+        // Show hint after 3 incorrect guesses
+        if (newCount >= 3) {
+          setGameState((prevState) => ({
+            ...prevState,
+            showHint: true,
+          }));
+        }
+        return newCount;
+      });
     }
 
     setUserGuess("");
   };
 
+  const handleRefresh = useCallback(() => {
+    handleGenerateQuestion();
+  }, [handleGenerateQuestion]);
+
   return {
     gameState,
     userGuess,
     soundEnabled,
+    hintEnabled,
     score,
     totalQuestions,
     isLoading,
@@ -179,6 +218,8 @@ export const useGameState = () => {
     setSoundEnabled,
     startGame,
     togglePause,
+    toggleHint,
     submitGuess,
+    handleRefresh,
   };
 };

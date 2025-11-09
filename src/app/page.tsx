@@ -13,6 +13,7 @@ export default function WhatIsThisGame() {
     gameState,
     userGuess,
     soundEnabled,
+    hintEnabled,
     score,
     totalQuestions,
     isLoading,
@@ -20,7 +21,9 @@ export default function WhatIsThisGame() {
     setSoundEnabled,
     startGame,
     togglePause,
+    toggleHint,
     submitGuess,
+    handleRefresh,
   } = useGameState();
 
   const [isTitleAnimating, setIsTitleAnimating] = useState(false);
@@ -56,7 +59,7 @@ export default function WhatIsThisGame() {
 
   return (
     <div
-      className="relative flex h-auto min-h-screen w-full flex-col group/design-root overflow-hidden font-body text-text-light"
+      className="relative flex h-screen w-full flex-col group/design-root overflow-hidden font-body text-text-light"
       style={{ backgroundColor: "#6A3E9F" }}
     >
       <GameAnimations />
@@ -73,11 +76,11 @@ export default function WhatIsThisGame() {
           duration: 1,
           ease: [0.4, 0, 0.2, 1],
         }}
+        className={showTitleInCenter ? "" : "hidden sm:flex"}
         style={{
           position: "absolute",
           left: 0,
           right: 0,
-          display: "flex",
           justifyContent: "center",
           alignItems: showTitleInCenter ? "center" : "flex-start",
           zIndex: 50,
@@ -88,8 +91,8 @@ export default function WhatIsThisGame() {
           ref={titleRef}
           className={`font-black leading-tight tracking-tighter bubbly-font text-white ${
             showTitleInCenter || isTitleAnimating
-              ? "text-7xl sm:text-8xl md:text-9xl"
-              : "text-6xl sm:text-6xl"
+              ? "md:text-9xl text-6xl"
+              : "md:text-6xl text-3xl"
           } ${showTitleInCenter ? "animate-glow" : ""} ${
             !showTitleInCenter && !isTitleAnimating ? "animate-pulse" : ""
           }`}
@@ -114,7 +117,7 @@ export default function WhatIsThisGame() {
         </motion.h1>
       </motion.div>
 
-      <div className="relative z-10 flex h-full grow flex-col p-4 sm:p-6">
+      <div className="relative z-10 flex h-full grow flex-col p-2 sm:p-6">
         {isIdle ? (
           showTitleInCenter && (
             <div className="flex flex-1 flex-col items-center justify-center text-center mt-20">
@@ -135,11 +138,14 @@ export default function WhatIsThisGame() {
             score={score}
             totalQuestions={totalQuestions}
             soundEnabled={soundEnabled}
+            hintEnabled={hintEnabled}
             canShowImage={canShowImage}
             onGuessChange={setUserGuess}
             onSubmit={submitGuess}
             onTogglePause={togglePause}
             onToggleSound={() => setSoundEnabled(!soundEnabled)}
+            onToggleHint={toggleHint}
+            onRefresh={handleRefresh}
           />
         ) : null}
       </div>

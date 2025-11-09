@@ -13,8 +13,8 @@ export const TimerBar = ({ timeLeft }: TimerBarProps) => {
   const isWarning = timeLeft <= 5;
 
   return (
-    <footer className="w-full pb-4">
-      <div className="w-full max-w-4xl mx-auto h-10 bg-white/20 rounded-full overflow-hidden input-3d backdrop-blur-sm relative shadow-lg border border-white/20">
+    <footer className="w-full pb-2 sm:pb-4 px-2 sm:px-0">
+      <div className="w-full max-w-4xl mx-auto h-6 sm:h-10 bg-white/20 rounded-full overflow-hidden input-3d backdrop-blur-sm relative shadow-lg border border-white/20">
         {/* Background gradient bar */}
         <motion.div
           className="h-full rounded-full relative overflow-hidden"

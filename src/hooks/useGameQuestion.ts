@@ -26,17 +26,19 @@ export const useGameQuestion = () => {
       isGeneratingRef.current = true;
       setIsLoading(true);
 
-      // Clear current image immediately to show loading
+      // Clear current image and hint immediately to show loading
       setGameState((prev) => ({
         ...prev,
         currentImage: "",
+        currentHint: "",
+        showHint: false,
         gameStatus: prev.gameStatus === "idle" ? "idle" : "playing",
       }));
 
       try {
-        // Try to use cached image first (70% chance to use cache if available)
-        // This reduces API calls and improves performance
-        const useCache = Math.random() < 0.7;
+        // Try to use cached image first (95% chance to use cache if available)
+        // This reduces API calls and improves performance significantly
+        const useCache = Math.random() < 0.95;
         let cachedWord: string | null = null;
         let cachedImage: string | null = null;
 
@@ -78,13 +80,20 @@ export const useGameQuestion = () => {
         // If no cache available, call API
         // Create AbortController for timeout
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 125000); // 125 seconds timeout (matches server timeout)
+        const timeoutId = setTimeout(() => controller.abort(), 28000); // 28 seconds timeout (matches server timeout of 30s, with 2s buffer)
 
-        const response = await fetch("/api/game/generate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: controller.signal,
-        });
+        let response: Response;
+        try {
+          response = await fetch("/api/game/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: controller.signal,
+          });
+        } catch (fetchError) {
+          clearTimeout(timeoutId);
+          // If fetch fails (network error, abort, etc.), throw to be caught by outer catch
+          throw fetchError;
+        }
 
         clearTimeout(timeoutId);
 
@@ -163,22 +172,38 @@ export const useGameQuestion = () => {
         console.error("Error generating question:", error);
         isGeneratingRef.current = false;
 
-        // Show user-friendly error message
-        if (error instanceof Error) {
-          if (error.name === "AbortError") {
-            alert(
-              "Request timed out. Please check your internet connection and try again."
-            );
-          } else if (error.message.includes("Failed to fetch")) {
-            alert(
-              "Unable to connect to the server. Please make sure the server is running and try again."
-            );
-          } else {
-            alert(`Error: ${error.message}`);
-          }
-        } else {
-          alert("An unexpected error occurred. Please try again.");
+        // If error is due to abort/timeout, show user-friendly message
+        const isAbortError =
+          error instanceof Error &&
+          (error.name === "AbortError" ||
+            error.message.includes("aborted") ||
+            error.message.includes("timeout"));
+
+        // Only retry if it's not an abort error and we haven't exceeded retries
+        if (!isAbortError && retryCount < 2) {
+          console.log(`Retrying question generation (attempt ${retryCount + 1})`);
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          // Get fresh used words for retry
+          let freshUsedWords: Set<string> = new Set();
+          setUsedWordsInSession((prev) => {
+            freshUsedWords = prev;
+            return prev;
+          });
+          isGeneratingRef.current = false; // Allow retry
+          return generateNewQuestion(
+            setGameState,
+            freshUsedWords,
+            setUsedWordsInSession,
+            retryCount + 1
+          );
         }
+
+        // If all retries failed, show error state but don't crash
+        setGameState((prev) => ({
+          ...prev,
+          currentImage: "",
+          gameStatus: "idle",
+        }));
       } finally {
         if (retryCount === 0) {
           isGeneratingRef.current = false;
