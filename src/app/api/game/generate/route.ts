@@ -65,7 +65,7 @@ const VOCABULARY_WORDS = [
 
 // Rate limiting - simple in-memory store
 const requestCounts = new Map<string, { count: number; lastReset: number }>();
-const RATE_LIMIT = 10; // requests per minute
+const RATE_LIMIT = 15; // requests per minute (increased from 10 to reduce rate limit issues)
 const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute in milliseconds
 
 // Simple cache to reduce word generation calls
@@ -223,10 +223,10 @@ function generateHint(word: string): string {
 }
 
 export async function POST(request: NextRequest) {
-  // Set a maximum timeout for the entire request (30 seconds)
+  // Set a maximum timeout for the entire request (45 seconds)
   // Fast providers (Unsplash/Pixabay) should respond in 2-5s
-  // AI generation has its own 20s timeout and will fail fast
-  const REQUEST_TIMEOUT = 30000;
+  // AI generation can take 30-40s as fallback
+  const REQUEST_TIMEOUT = 45000;
 
   const timeoutPromise = new Promise<NextResponse>((resolve) => {
     setTimeout(() => {
@@ -248,21 +248,55 @@ export async function POST(request: NextRequest) {
 
       // Check rate limiting
       if (!checkRateLimit(clientId)) {
+        const client = requestCounts.get(clientId);
+        const now = Date.now();
+        const timeUntilReset = client
+          ? RATE_LIMIT_WINDOW - (now - client.lastReset)
+          : RATE_LIMIT_WINDOW;
+        const retryAfter = Math.ceil(timeUntilReset / 1000); // Convert to seconds
+
         return NextResponse.json(
           { error: "Too many requests. Please try again in a minute." },
-          { status: 429 }
+          {
+            status: 429,
+            headers: {
+              "Retry-After": retryAfter.toString(),
+            },
+          }
         );
       }
 
-      // Get or create used words set for this client
+      // Parse request body to get used words from client (localStorage)
+      let clientUsedWords: Set<string> = new Set();
+      try {
+        const body = await request.json();
+        if (body.usedWords && Array.isArray(body.usedWords)) {
+          clientUsedWords = new Set(
+            body.usedWords.map((word: string) => word.toLowerCase())
+          );
+        }
+      } catch (error) {
+        // If body parsing fails, continue with empty set
+        console.warn("Failed to parse request body for used words:", error);
+      }
+
+      // Get or create used words set for this client (server-side tracking)
       if (!usedWordsPerClient.has(clientId)) {
         usedWordsPerClient.set(clientId, new Set<string>());
       }
-      const usedWords = usedWordsPerClient.get(clientId)!;
+      const serverUsedWords = usedWordsPerClient.get(clientId)!;
+
+      // Combine client and server used words to avoid any duplicates
+      const allUsedWords = new Set<string>();
+      clientUsedWords.forEach((word) => allUsedWords.add(word));
+      serverUsedWords.forEach((word) => allUsedWords.add(word));
 
       // Always generate a new word to avoid repetition
       // Don't use cache for words to ensure variety
-      const vocabularyWord = generateRandomVocabularyWord(usedWords);
+      const vocabularyWord = generateRandomVocabularyWord(allUsedWords);
+
+      // Also add to server-side tracking
+      serverUsedWords.add(vocabularyWord.toLowerCase());
 
       // Clean up old used words sets (keep only recent clients)
       if (usedWordsPerClient.size > 1000) {

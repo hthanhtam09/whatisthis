@@ -114,93 +114,128 @@ class UnsplashProvider implements ImageProvider {
       throw new Error("Unsplash API key not configured");
     }
 
-    try {
-      // Search for high-quality images with better filters
-      // per_page=5: Get more results to choose the best one
-      // orientation=squarish: Better for game display (square-like images)
-      // Valid values: landscape, portrait, squarish
-      const searchUrl = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(
-        word
-      )}&per_page=5&orientation=squarish&client_id=${this.apiKey}`;
+    // Try multiple query strategies for better accuracy
+    const queryStrategies = [
+      word, // First try: just the word itself (most accurate)
+      `${word} isolated`, // Second try: word + isolated
+      `${word} object`, // Third try: word + object
+    ];
 
-      const response = await fetch(searchUrl, {
-        headers: {
-          "Accept-Version": "v1",
-        },
-      });
+    let lastError: Error | null = null;
 
-      if (!response.ok) {
-        // Get error details from response
-        let errorMessage = `Unsplash API error: ${response.status}`;
-        try {
-          const errorText = await response.text();
-          if (errorText) {
-            try {
-              const errorData = JSON.parse(errorText);
-              if (errorData.errors && errorData.errors.length > 0) {
-                errorMessage += ` - ${errorData.errors.join(", ")}`;
-              } else if (errorData.message) {
-                errorMessage += ` - ${errorData.message}`;
-              }
-            } catch {
-              // If not JSON, use text as is
-              errorMessage += ` - ${errorText.substring(0, 200)}`;
+    for (const query of queryStrategies) {
+      try {
+        const searchUrl = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(
+          query
+        )}&per_page=30&orientation=squarish&client_id=${this.apiKey}`;
+
+        const response = await fetch(searchUrl, {
+          headers: {
+            "Accept-Version": "v1",
+          },
+        });
+
+        if (!response.ok) {
+          if (response.status === 429) {
+            const resetHeader = response.headers.get("X-Ratelimit-Reset");
+            if (resetHeader) {
+              this.rateLimit.resetAt = parseInt(resetHeader) * 1000;
             }
-          } else {
-            errorMessage += ` - ${response.statusText}`;
+            throw new Error("Unsplash rate limit exceeded");
           }
-        } catch (e) {
-          // If can't read error, use status text
-          errorMessage += ` - ${response.statusText}`;
+          // Try next query strategy
+          continue;
         }
 
-        if (response.status === 429) {
-          // Rate limited
-          const resetHeader = response.headers.get("X-Ratelimit-Reset");
-          if (resetHeader) {
-            this.rateLimit.resetAt = parseInt(resetHeader) * 1000;
-          }
-          throw new Error("Unsplash rate limit exceeded");
+        const data = await response.json();
+        if (!data.results || data.results.length === 0) {
+          continue; // Try next query strategy
         }
-        throw new Error(errorMessage);
+
+        const wordLower = word.toLowerCase();
+
+        // Filter and score images by relevance
+        const scoredResults = data.results
+          .map((result: any) => {
+            const tags = (result.tags || [])
+              .map((tag: any) => tag.title?.toLowerCase() || "")
+              .join(" ");
+            const description = (result.description || "").toLowerCase();
+            const altDescription = (result.alt_description || "").toLowerCase();
+            const slug = (result.slug || "").toLowerCase();
+
+            // Calculate relevance score
+            let relevance = 0;
+            if (tags.includes(wordLower)) relevance += 200;
+            if (description.includes(wordLower)) relevance += 100;
+            if (altDescription.includes(wordLower)) relevance += 80;
+            if (slug.includes(wordLower)) relevance += 60;
+
+            // Penalize generic words that might match incorrectly
+            const genericWords = [
+              "paper",
+              "document",
+              "text",
+              "background",
+              "pattern",
+              "abstract",
+            ];
+            const hasGenericWord = genericWords.some(
+              (gw) =>
+                tags.includes(gw) ||
+                description.includes(gw) ||
+                altDescription.includes(gw)
+            );
+            if (hasGenericWord && relevance < 100) {
+              relevance = 0; // Reject if it's generic and not highly relevant
+            }
+
+            return {
+              ...result,
+              relevance,
+              popularity: (result.likes || 0) + (result.downloads || 0) / 10,
+            };
+          })
+          .filter((result: any) => result.relevance > 0) // Only keep relevant images
+          .sort((a: any, b: any) => {
+            // Prioritize relevance, then popularity
+            if (b.relevance !== a.relevance) {
+              return b.relevance - a.relevance;
+            }
+            return b.popularity - a.popularity;
+          });
+
+        if (scoredResults.length > 0) {
+          const bestImage = scoredResults[0];
+
+          // Use full size for best quality (urls.full is 1080px on longest side)
+          // urls.raw is original size but may be too large, full is optimal
+          const imageUrl = bestImage.urls.full || bestImage.urls.regular;
+
+          // Fetch the image and convert to base64
+          const imageResponse = await fetch(imageUrl);
+          if (!imageResponse.ok) {
+            continue; // Try next query strategy
+          }
+
+          const imageBlob = await imageResponse.blob();
+          const arrayBuffer = await imageBlob.arrayBuffer();
+          const base64 = Buffer.from(arrayBuffer).toString("base64");
+
+          // Update rate limit
+          this.rateLimit.count++;
+
+          return `data:${imageBlob.type};base64,${base64}`;
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        // Continue to next query strategy
+        continue;
       }
-
-      const data = await response.json();
-      if (!data.results || data.results.length === 0) {
-        throw new Error("No images found for this word");
-      }
-
-      // Select best image from results (prioritize by likes and downloads)
-      // Sort by popularity metrics to get the best quality image
-      const sortedResults = data.results.sort((a: any, b: any) => {
-        const scoreA = (a.likes || 0) + (a.downloads || 0) / 10;
-        const scoreB = (b.likes || 0) + (b.downloads || 0) / 10;
-        return scoreB - scoreA;
-      });
-
-      const bestImage = sortedResults[0];
-
-      // Use full size for best quality (urls.full is 1080px on longest side)
-      // urls.raw is original size but may be too large, full is optimal
-      const imageUrl = bestImage.urls.full || bestImage.urls.regular;
-
-      // Fetch the image and convert to base64
-      const imageResponse = await fetch(imageUrl);
-      if (!imageResponse.ok) {
-        throw new Error("Failed to fetch image from Unsplash");
-      }
-
-      const imageBlob = await imageResponse.blob();
-      const arrayBuffer = await imageBlob.arrayBuffer();
-      const base64 = Buffer.from(arrayBuffer).toString("base64");
-
-      // Update rate limit
-      this.rateLimit.count++;
-
-      return `data:${imageBlob.type};base64,${base64}`;
-    } catch (error) {
-      throw error;
     }
+
+    // All query strategies failed
+    throw lastError || new Error("No accurate images found for this word");
   }
 
   async fetchImage(word: string): Promise<string> {
@@ -276,7 +311,9 @@ class AIImageProvider implements ImageProvider {
   }
 
   private getImagePromptForItem(item: string): string {
-    return `a cute cartoon illustration of a ${item}, colorful, simple, clean lines, children's book style, bright colors, digital art, animation style, educational content, white background, isolated object`;
+    // Enhanced prompt for maximum accuracy and clarity
+    // Focus on the main object, clear and recognizable
+    return `a clear, simple, and recognizable illustration of a ${item}, isolated on white background, high quality, detailed, easy to identify, educational style, bright colors, clean lines, no text, no words, centered composition, professional photography style, sharp focus, well-lit, studio lighting`;
   }
 
   private async fetchImageInternal(word: string): Promise<string> {
@@ -292,7 +329,7 @@ class AIImageProvider implements ImageProvider {
     }
 
     const prompt = this.getImagePromptForItem(word);
-    const TIMEOUT_MS = 20000; // 20 seconds for AI generation (reduced from 60s for faster fallback)
+    const TIMEOUT_MS = 35000; // 35 seconds for AI generation (allows time for generation but fails fast if needed)
 
     // Try each AI API in order
     for (let attempt = 0; attempt < AI_IMAGE_APIS.length; attempt++) {
@@ -474,72 +511,116 @@ class PixabayProvider implements ImageProvider {
       throw new Error("Pixabay API key not configured");
     }
 
-    try {
-      // Search for high-quality illustration/vector images
-      // order=popular: Get most popular images (usually better quality)
-      // per_page=5: Get more results to choose the best one
-      // min_width=800: Minimum width for better quality
-      // min_height=800: Minimum height for better quality
-      // safesearch=true: Safe content only
-      const searchUrl = `https://pixabay.com/api/?key=${
-        this.apiKey
-      }&q=${encodeURIComponent(
-        word
-      )}&image_type=illustration&category=backgrounds&safesearch=true&order=popular&per_page=5&min_width=800&min_height=800`;
+    // Try multiple query strategies for better accuracy
+    const queryStrategies = [
+      word, // First try: just the word itself (most accurate)
+      `${word} isolated`, // Second try: word + isolated
+      `${word} object`, // Third try: word + object
+    ];
 
-      const response = await fetch(searchUrl);
+    let lastError: Error | null = null;
 
-      if (!response.ok) {
-        if (response.status === 429) {
-          // Rate limited - wait until reset
-          this.rateLimit.resetAt = Date.now() + 60000;
-          throw new Error("Pixabay rate limit exceeded");
+    for (const query of queryStrategies) {
+      try {
+        const searchUrl = `https://pixabay.com/api/?key=${
+          this.apiKey
+        }&q=${encodeURIComponent(
+          query
+        )}&image_type=all&safesearch=true&order=popular&per_page=30&min_width=800&min_height=800`;
+
+        const response = await fetch(searchUrl);
+
+        if (!response.ok) {
+          if (response.status === 429) {
+            this.rateLimit.resetAt = Date.now() + 60000;
+            throw new Error("Pixabay rate limit exceeded");
+          }
+          continue; // Try next query strategy
         }
-        throw new Error(`Pixabay API error: ${response.status}`);
+
+        const data = await response.json();
+        if (!data.hits || data.hits.length === 0) {
+          continue; // Try next query strategy
+        }
+
+        const wordLower = word.toLowerCase();
+
+        // Filter and score images by relevance
+        const scoredHits = data.hits
+          .map((hit: any) => {
+            const tags = (hit.tags || "").toLowerCase();
+
+            // Calculate relevance score
+            let relevance = 0;
+            if (tags.includes(wordLower)) relevance += 200;
+
+            // Penalize generic words that might match incorrectly
+            const genericWords = [
+              "paper",
+              "document",
+              "text",
+              "background",
+              "pattern",
+              "abstract",
+            ];
+            const hasGenericWord = genericWords.some((gw) => tags.includes(gw));
+            if (hasGenericWord && relevance < 100) {
+              relevance = 0; // Reject if it's generic and not highly relevant
+            }
+
+            return {
+              ...hit,
+              relevance,
+              popularity:
+                (hit.likes || 0) +
+                (hit.views || 0) / 100 +
+                (hit.downloads || 0) / 10,
+            };
+          })
+          .filter((hit: any) => hit.relevance > 0) // Only keep relevant images
+          .sort((a: any, b: any) => {
+            // Prioritize relevance, then popularity
+            if (b.relevance !== a.relevance) {
+              return b.relevance - a.relevance;
+            }
+            return b.popularity - a.popularity;
+          });
+
+        if (scoredHits.length > 0) {
+          const bestImage = scoredHits[0];
+
+          // Use fullHDURL (1920x1080) or imageURL (full size) for best quality
+          // Fallback to largeImageURL if fullHD not available
+          const imageUrl =
+            bestImage.fullHDURL ||
+            bestImage.imageURL ||
+            bestImage.largeImageURL ||
+            bestImage.webformatURL;
+
+          // Fetch the image and convert to base64
+          const imageResponse = await fetch(imageUrl);
+          if (!imageResponse.ok) {
+            continue; // Try next query strategy
+          }
+
+          const imageBlob = await imageResponse.blob();
+          const arrayBuffer = await imageBlob.arrayBuffer();
+          const base64 = Buffer.from(arrayBuffer).toString("base64");
+
+          // Update rate limit
+          this.rateLimit.count++;
+
+          return `data:${imageBlob.type};base64,${base64}`;
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        // Continue to next query strategy
+        continue;
       }
-
-      const data = await response.json();
-      if (!data.hits || data.hits.length === 0) {
-        throw new Error("No images found for this word");
-      }
-
-      // Select best image from results (prioritize by likes, views, and downloads)
-      // Sort by popularity metrics to get the best quality image
-      const sortedHits = data.hits.sort((a: any, b: any) => {
-        const scoreA =
-          (a.likes || 0) + (a.views || 0) / 100 + (a.downloads || 0) / 10;
-        const scoreB =
-          (b.likes || 0) + (b.views || 0) / 100 + (b.downloads || 0) / 10;
-        return scoreB - scoreA;
-      });
-
-      const bestImage = sortedHits[0];
-
-      // Use fullHDURL (1920x1080) or imageURL (full size) for best quality
-      // Fallback to largeImageURL if fullHD not available
-      const imageUrl =
-        bestImage.fullHDURL ||
-        bestImage.imageURL ||
-        bestImage.largeImageURL ||
-        bestImage.webformatURL;
-
-      // Fetch the image and convert to base64
-      const imageResponse = await fetch(imageUrl);
-      if (!imageResponse.ok) {
-        throw new Error("Failed to fetch image from Pixabay");
-      }
-
-      const imageBlob = await imageResponse.blob();
-      const arrayBuffer = await imageBlob.arrayBuffer();
-      const base64 = Buffer.from(arrayBuffer).toString("base64");
-
-      // Update rate limit
-      this.rateLimit.count++;
-
-      return `data:${imageBlob.type};base64,${base64}`;
-    } catch (error) {
-      throw error;
     }
+
+    // All query strategies failed
+    throw lastError || new Error("No accurate images found for this word");
   }
 
   async fetchImage(word: string): Promise<string> {
@@ -650,16 +731,15 @@ class ImageProvidersManager {
       throw new Error("All image providers are rate limited");
     }
 
-    // If we have fast providers (Unsplash/Pixabay), try them in parallel first
-    // AI generation is slow, so we'll try it separately if fast providers fail
+    // Prioritize fast providers (Unsplash/Pixabay) for speed (2-5s)
+    // Only use AI generation as fallback if fast providers don't find accurate images
     const fastProviders = availableProviders.filter(
       (p) => p.name === "unsplash" || p.name === "pixabay"
     );
-    const slowProviders = availableProviders.filter(
-      (p) => p.name === "ai-image"
-    );
+    const aiProviders = availableProviders.filter((p) => p.name === "ai-image");
 
-    // Try fast providers in parallel (race condition - first one wins)
+    // Try fast providers first in parallel (race condition - first one wins)
+    // This is much faster (2-5s) than AI generation (30-60s)
     if (fastProviders.length > 0) {
       const fastPromises = fastProviders.map((provider) =>
         provider
@@ -671,25 +751,39 @@ class ImageProvidersManager {
           })
       );
 
-      // Race: get the first successful result
-      const results = await Promise.allSettled(fastPromises);
-      for (const result of results) {
-        if (
-          result.status === "fulfilled" &&
-          result.value !== null &&
-          result.value.image
-        ) {
-          // Cache the result
-          this.setCachedImage(word, result.value.image);
-          return result.value.image;
-        }
+      // Race: get the first successful result with timeout
+      // If fast providers take more than 10s, start AI generation in parallel
+      const fastTimeout = 10000; // 10 seconds
+      const fastTimeoutPromise = new Promise<null>((resolve) => {
+        setTimeout(() => resolve(null), fastTimeout);
+      });
+
+      const fastResult = await Promise.race([
+        Promise.allSettled(fastPromises).then((results) => {
+          for (const result of results) {
+            if (
+              result.status === "fulfilled" &&
+              result.value !== null &&
+              result.value.image
+            ) {
+              return result.value;
+            }
+          }
+          return null;
+        }),
+        fastTimeoutPromise,
+      ]);
+
+      if (fastResult && fastResult.image) {
+        // Cache the result
+        this.setCachedImage(word, fastResult.image);
+        return fastResult.image;
       }
     }
 
-    // If fast providers failed, try slow providers (AI generation) sequentially
-    // We don't parallelize AI generation because it's resource-intensive
-    let lastError: Error | null = null;
-    for (const provider of slowProviders) {
+    // If fast providers failed or timed out, try AI generation as fallback
+    // AI generation is slower but more accurate
+    for (const provider of aiProviders) {
       try {
         const image = await provider.fetchImage(word);
 
@@ -699,18 +793,13 @@ class ImageProvidersManager {
         return image;
       } catch (error) {
         console.error(`Error fetching image from ${provider.name}:`, error);
-        lastError = error instanceof Error ? error : new Error(String(error));
         // Continue to next provider
         continue;
       }
     }
 
     // All providers failed
-    throw new Error(
-      `All image providers failed. Last error: ${
-        lastError?.message || "Unknown error"
-      }`
-    );
+    throw new Error(`All image providers failed. Please try again.`);
   }
 
   // Get provider status

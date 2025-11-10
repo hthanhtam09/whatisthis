@@ -4,6 +4,11 @@ import { useGameQuestion } from "./useGameQuestion";
 import { useGameTimer } from "./useGameTimer";
 import { useGameSounds } from "./useGameSounds";
 import { createFireworks } from "@/components/WhatIsThisGame/Fireworks";
+import {
+  getUsedWordsFromStorage,
+  saveUsedWordsToStorage,
+  addUsedWordToStorage,
+} from "@/utils/usedWordsStorage";
 
 export const useGameState = () => {
   const [gameState, setGameState] = useState<GameState>({
@@ -23,14 +28,27 @@ export const useGameState = () => {
   const [score, setScore] = useState(0);
   const [totalQuestions, setTotalQuestions] = useState(0);
   const [incorrectGuesses, setIncorrectGuesses] = useState(0);
+  // Load used words from localStorage on mount
   const [usedWordsInSession, setUsedWordsInSession] = useState<Set<string>>(
-    new Set()
+    () => {
+      if (typeof window !== "undefined") {
+        return getUsedWordsFromStorage();
+      }
+      return new Set();
+    }
   );
   const usedWordsRef = useRef<Set<string>>(new Set());
 
   // Keep ref in sync with state
   useEffect(() => {
     usedWordsRef.current = usedWordsInSession;
+  }, [usedWordsInSession]);
+
+  // Save to localStorage whenever usedWordsInSession changes
+  useEffect(() => {
+    if (usedWordsInSession.size > 0) {
+      saveUsedWordsToStorage(usedWordsInSession);
+    }
   }, [usedWordsInSession]);
 
   // Reset incorrect guesses when a new question starts
@@ -79,6 +97,7 @@ export const useGameState = () => {
       setUsedWordsInSession((prev) => {
         const newSet = new Set(prev);
         newSet.add(currentAnswer);
+        addUsedWordToStorage(currentAnswer);
         return newSet;
       });
 
@@ -103,8 +122,10 @@ export const useGameState = () => {
 
   const startGame = useCallback(() => {
     // Only reset if game is actually in idle state (starting fresh)
+    // Note: We don't clear used words from localStorage when starting a new game
+    // This ensures words don't repeat even after page reload
     if (gameState.gameStatus === "idle") {
-      setUsedWordsInSession(new Set());
+      // Keep used words from localStorage, don't reset them
       setScore(0);
       setTotalQuestions(0);
     }
@@ -148,9 +169,11 @@ export const useGameState = () => {
       setTotalQuestions((prev) => prev + 1);
 
       // Mark current word as used
+      const currentAnswer = gameState.currentAnswer.toLowerCase();
       setUsedWordsInSession((prev) => {
         const newSet = new Set(prev);
-        newSet.add(gameState.currentAnswer.toLowerCase());
+        newSet.add(currentAnswer);
+        addUsedWordToStorage(currentAnswer);
         return newSet;
       });
 
